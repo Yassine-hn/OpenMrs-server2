@@ -1,0 +1,228 @@
+services:
+  vllm:
+    image: vllm/vllm-openai:v0.11.0@sha256:014a95f21c9edf6abe0aea6b07353f96baa4ec291c427bb1176dc7c93a85845c
+    container_name: server2-vllm
+    restart: unless-stopped
+    command:
+      - --model
+      - ${LLM_MODEL_PATH:-/models/medgemma-quant/medgemma-1.5-4b-it-variant-C-fp8}
+      - --served-model-name
+      - ${LLM_MODEL_NAME:-medgemma-1.5-4b-it}
+      - --max-model-len
+      - "${LLM_MAX_MODEL_LEN:-4096}"
+      - --gpu-memory-utilization
+      - "${LLM_GPU_MEMORY_UTILIZATION:-0.50}"
+      - --max-num-seqs
+      - "${LLM_MAX_NUM_SEQS:-8}"
+      - --guided-decoding-backend
+      - xgrammar
+      - --no-enable-prefix-caching
+    volumes:
+      - ${LLM_MODEL_DIR:-/home/cerist/models}:/models:ro
+    ports:
+      - "127.0.0.1:${VLLM_PORT:-8001}:8000"
+    networks:
+      - server2_net
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\""]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 180s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  clinical-assistant:
+    build:
+      context: ./services/clinical-assistant
+    image: chu-blida/clinical-assistant:1.0.0
+    container_name: server2-clinical-assistant
+    restart: unless-stopped
+    depends_on:
+      vllm:
+        condition: service_healthy
+    ports:
+      - "${ASSISTANT_PORT:-8000}:8000"
+    environment:
+      LLM_BASE_URL: http://vllm:8000/v1
+      LLM_MODEL_NAME: ${LLM_MODEL_NAME:-medgemma-1.5-4b-it}
+      OPENMRS_BASE_URL: ${OPENMRS_BASE_URL:-http://10.0.211.249}
+      STT_ENGINE_URL: http://stt-engine:8000/v1
+      STT_MODEL_NAME: ${STT_MODEL:-Qwen3-ASR-0.6B}
+    networks:
+      - server2_net
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\""]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  monai-server:
+    image: chu-blida/monai-label:1.0.0@sha256:8b5ead3d806244570394ab9b4aa60ae749fa6fef9444cacc9e4bac4ad0569605
+    container_name: server2-monai
+    restart: unless-stopped
+    shm_size: "8gb"
+    environment:
+      - CUDA_VISIBLE_DEVICES=0
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=all
+      - VLLM_BASE_URL=http://vllm:8000/v1
+      - NNINTER_MAX_SESSIONS=10
+      - NNINTER_SESSION_IDLE_TIMEOUT=600
+    volumes:
+      - ${MONAI_STATE_DIR:-/home/cerist/ohif-ai-eval/monai-label}/checkpoints:/code/checkpoints
+      - ${MONAI_STATE_DIR:-/home/cerist/ohif-ai-eval/monai-label}/apps:/code/apps
+      - ${MONAI_STATE_DIR:-/home/cerist/ohif-ai-eval/monai-label}/predictions:/code/predictions
+      - ${MONAI_STATE_DIR:-/home/cerist/ohif-ai-eval/monai-label}/img_cache:/code/img_cache
+      - ${MONAI_STATE_DIR:-/home/cerist/ohif-ai-eval/monai-label}/volumes/root-cache:/root/.cache
+    command:
+      - python
+      - -m
+      - monailabel.main
+      - start_server
+      - --app
+      - /code/apps/radiology
+      - --studies
+      - ${ORTHANC_DICOMWEB_URL:-http://10.0.211.249:8042/dicom-web}
+      - --conf
+      - models
+      - segmentation
+      - --conf
+      - use_pretrained_model
+      - "false"
+      - -p
+      - "8002"
+    ports:
+      - "${MONAI_PORT:-8002}:8002"
+    networks:
+      - server2_net
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  ohif-ai-viewer:
+    image: webapp:prod@sha256:1938bef4a12a77d4d83d40a6ccc52b664f3e3ab8ec2ab3a991cfa09547d1ba1e
+    container_name: server2-ohif-ai-viewer
+    restart: unless-stopped
+    depends_on:
+      - monai-server
+    ports:
+      - "${OHIF_AI_PORT:-1026}:1026"
+    volumes:
+      - ./config/ohif-ai/nginx.conf:/etc/nginx/nginx.conf:ro
+    networks:
+      - server2_net
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  stt-engine:
+    image: chu-blida/vllm-audio:v0.28.0@sha256:21909114760283c11adbfe73ade9cabf150e6a4ee647729a725972467aa853be
+    container_name: server2-stt-engine
+    restart: unless-stopped
+    command:
+      - --model
+      - ${STT_MODEL_PATH:-Qwen/Qwen3-ASR-0.6B}
+      - --served-model-name
+      - ${STT_MODEL:-Qwen3-ASR-0.6B}
+      - --max-model-len
+      - "4096"
+      - --gpu-memory-utilization
+      - "${STT_GPU_FRACTION:-0.25}"
+      - --max-num-seqs
+      - "8"
+    volumes:
+      - ${LLM_MODEL_DIR:-/home/cerist/models}/hf-cache:/root/.cache/huggingface
+    ports:
+      - "127.0.0.1:${STT_ENGINE_PORT:-8004}:8000"
+    networks:
+      - server2_net
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\""]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 180s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  stt-gateway:
+    image: chu-blida/stt-gateway:0.1.0@sha256:5fdd49dfe02ade9c06c08dcd4670e701114da655caa175801bb8b67ed3fecd26
+    container_name: server2-stt-gateway
+    restart: unless-stopped
+    depends_on:
+      stt-engine:
+        condition: service_healthy
+    environment:
+      STT_ENGINE_URL: http://stt-engine:8000/v1
+      STT_CHANNEL_SECRET: ${STT_CHANNEL_SECRET:-SDD+o6pRp5N/TsAKRmEE7aBCsWZ6Co5Pf1ZcF6GYR0ROpWPA7tDMTZU5iHb/3WWS}
+      STT_JWT_AUDIENCE: stt-service
+      STT_TOKEN_PURPOSE: stt
+      JWT_ISSUER: openmrs-agentgateway
+      OPENMRS_JWT_PUBLIC_KEY: ${OPENMRS_JWT_PUBLIC_KEY:-MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAnxlMBGVwuJK6DhLdk9W4faeVTu/w4/3/Ndjj0NxvSJJ+xnNlBYKo2ZgKw2SOeA7Tr7YbJWiSRpUOdqAcS8Xq3aJTlaMVAzUl/ZQ5kfUb4qJu+DNdvJqrrW3H8knMcpwUSJQQJiQTylS2HFzY/EDY82aIM5nRGfikb/7IvcH7Bd4dgN8NOqBypoULz1cPceANKa8iIyBNxOO+M+zTWdndmHlo+98X7xq3G444sQBGHMSOqdY2Bv/fzCfjZPr2ukSw9BzKjMuI4dNMlc1SGboS0ZtWVEqhB/t/SlGnuPxgk/1jwWJMizQZXFM1VC7mT24+RWG8rlNz5avbc6HsrdcbAQIDAQAB}
+      STT_MODEL: ${STT_MODEL:-Qwen3-ASR-0.6B}
+      STT_LANGUAGE: fr
+      STT_MAX_UTTERANCE_SECONDS: 30
+      STT_MIN_UTTERANCE_MS: 300
+      STT_MAX_CONCURRENT_PER_USER: 1
+      STT_SILENCE_RMS_THRESHOLD: 200
+      STT_BIAS_LEXICON_PATH: /etc/stt/lexicon-neurochir.txt
+    volumes:
+      - ./config/stt/lexicon-neurochir.txt:/etc/stt/lexicon-neurochir.txt:ro
+    ports:
+      - "${STT_GATEWAY_PORT:-8003}:8000"
+    networks:
+      - server2_net
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  server2_net:
+    name: server2_net
+    driver: bridge

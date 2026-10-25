@@ -1,0 +1,29 @@
+# Environment & secrets
+.env
+.env.*
+!.env.example
+
+# Private documentation & working logs
+PLAN-*.md
+docs/PLAN-*.md
+WORK-LOG.md
+
+# Large model weights & downloads
+models/
+weights/
+*.bin
+*.safetensors
+*.gguf
+
+# Local data & Docker volumes
+data/
+backups/
+volumes/
+
+# Python / Node / OS artifacts
+__pycache__/
+*.py[cod]
+node_modules/
+.DS_Store
+.vscode/
+.idea/
