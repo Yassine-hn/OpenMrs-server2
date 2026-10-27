@@ -59,6 +59,8 @@ services:
       OPENMRS_BASE_URL: ${OPENMRS_BASE_URL:-http://10.0.211.249}
       STT_ENGINE_URL: http://stt-engine:8000/v1
       STT_MODEL_NAME: ${STT_MODEL:-Qwen3-ASR-0.6B}
+    volumes:
+      - ./services/clinical-assistant/app:/app/app:ro
     networks:
       - server2_net
     healthcheck:

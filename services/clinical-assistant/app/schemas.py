@@ -78,10 +78,17 @@ class ChatRequest(BaseModel):
     messages: List[ChatMessage]
     patient_context: Optional[str] = None
 
+class ActionProposal(BaseModel):
+    action_type: str = Field(..., description="Type d'action: update_patient_address, record_clinical_note, add_clinical_diagnosis")
+    action_label: str = Field(..., description="Label court pour l'action")
+    parameters: Dict[str, Any] = Field(default_factory=dict, description="Paramètres extraits pour l'API OpenMRS")
+    preview_text: str = Field(..., description="Texte de prévisualisation à valider")
+
 class ChatResponse(BaseModel):
     response: str
     model: str
     latency_ms: float
+    action: Optional[ActionProposal] = None
 
 class TranscribeResponse(BaseModel):
     text: str

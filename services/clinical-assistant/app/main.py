@@ -1,4 +1,5 @@
 import logging
+import re
 import time
 from typing import Optional
 import httpx
@@ -13,6 +14,7 @@ from .prompts import (
     build_operative_report_prompt,
 )
 from .schemas import (
+    ActionProposal,
     ChatRequest,
     ChatResponse,
     ConsultationRequest,
@@ -133,10 +135,87 @@ async def transcribe_audio(
         logger.error("Error transcribing audio: %s", e)
         raise HTTPException(status_code=500, detail=f"STT Error: {str(e)}")
 
+def extract_action_proposal(user_prompt: str) -> Optional[ActionProposal]:
+    p = user_prompt.strip()
+    if not p:
+        return None
+
+    # 1. Update patient address intent
+    addr_patterns = [
+        r"(?:modifie[rz]?|change[rz]?|mets? à jour|mettre à jour|actualise[rz]?|nouvelle)\s+(?:l['’\s]?adresse|adresse)(?:\s+du\s+patient)?\s*(?::|à|en|\=)\s*(.+)",
+        r"(?:adresse|habite|demeure)\s*(?::|à|\=)\s*(.+)",
+    ]
+    for pat in addr_patterns:
+        m = re.search(pat, p, re.IGNORECASE)
+        if m:
+            raw_addr = m.group(1).strip().rstrip(".")
+            parts = [x.strip() for x in re.split(r"[,–-]", raw_addr) if x.strip()]
+            address1 = parts[0] if len(parts) >= 2 else raw_addr
+            city = parts[1] if len(parts) >= 2 else "Blida"
+            return ActionProposal(
+                action_type="update_patient_address",
+                action_label="Mettre à jour l'adresse du patient",
+                parameters={
+                    "address1": address1,
+                    "cityVillage": city,
+                    "full_address": raw_addr,
+                },
+                preview_text=f"Nouvelle adresse : {address1} ({city})",
+            )
+
+    # 2. Add clinical diagnosis intent
+    diag_patterns = [
+        r"(?:ajoute[rz]?|enregistre[rz]?|noter?|poser?)\s+(?:le\s+|un\s+)?diagnostic(?:\s+de|\s+d['’\s]|\s*:)?\s*(.+)",
+        r"(?:diagnostic\s*(?:retenu|principal|post-op|posé)?\s*:\s*)(.+)",
+    ]
+    for pat in diag_patterns:
+        m = re.search(pat, p, re.IGNORECASE)
+        if m:
+            diag_text = m.group(1).strip().rstrip(".")
+            return ActionProposal(
+                action_type="add_clinical_diagnosis",
+                action_label="Ajouter un diagnostic au dossier",
+                parameters={
+                    "diagnosis": diag_text,
+                    "status": "ACTIVE",
+                },
+                preview_text=f"Diagnostic : {diag_text} (Statut: Actif)",
+            )
+
+    # 3. Record clinical note / observation intent
+    note_patterns = [
+        r"(?:enregistre[rz]?|ajoute[rz]?|consigne[rz]?|écris|écrire|créer?)\s+(?:une\s+)?(?:note|observation|remarque)(?:\s+clinique|\s+de\s+consultation|\s+d['’\s]évolution)?\s*(?::|\-|\=)\s*(.+)",
+        r"(?:observation\s*(?:clinique)?\s*:\s*)(.+)",
+    ]
+    for pat in note_patterns:
+        m = re.search(pat, p, re.IGNORECASE)
+        if m:
+            note_text = m.group(1).strip()
+            return ActionProposal(
+                action_type="record_clinical_note",
+                action_label="Enregistrer une note de consultation",
+                parameters={
+                    "note": note_text,
+                    "encounter_type": "1f331153-e484-554a-9184-1d45a2399166",
+                    "location": "795d1d96-f5fb-4966-bea0-753525a24d71",
+                },
+                preview_text=f"Note clinique : « {note_text} »",
+            )
+
+    return None
+
 @app.post("/v1/chat", response_model=ChatResponse)
 async def chat_clinical_assistant(request: ChatRequest):
     logger.info("Received clinical chat request with %d messages", len(request.messages))
     try:
+        last_user_prompt = ""
+        for m in reversed(request.messages):
+            if m.role == "user" and m.content.strip():
+                last_user_prompt = m.content.strip()
+                break
+
+        action_proposal = extract_action_proposal(last_user_prompt)
+
         full_system = SYSTEM_PROMPT
         if request.patient_context:
             full_system += f"\n\nContexte clinique du patient en cours :\n{request.patient_context}"
@@ -173,6 +252,7 @@ async def chat_clinical_assistant(request: ChatRequest):
             response=content,
             model=settings.LLM_MODEL_NAME,
             latency_ms=round(latency_ms, 2),
+            action=action_proposal,
         )
     except Exception as e:
         logger.error("Error in clinical chat: %s", e)
