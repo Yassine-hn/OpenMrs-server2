@@ -20,6 +20,8 @@ class LLMClient:
             "max_tokens": max_tokens,
             "temperature": 0.2,
             "top_p": 0.95,
+            "presence_penalty": 0.1,
+            "frequency_penalty": 0.2,
         }
         
         start_time = time.perf_counter()

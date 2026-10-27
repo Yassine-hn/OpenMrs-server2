@@ -241,6 +241,8 @@ async def chat_clinical_assistant(request: ChatRequest):
                 "max_tokens": 1024,
                 "temperature": 0.3,
                 "top_p": 0.95,
+                "presence_penalty": 0.1,
+                "frequency_penalty": 0.2,
             }
             resp = await client.post(f"{settings.LLM_BASE_URL}/chat/completions", json=payload)
             resp.raise_for_status()
